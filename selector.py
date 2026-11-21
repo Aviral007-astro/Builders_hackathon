@@ -6,6 +6,8 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 
+from impact import equivalent_comment_edits
+
 
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 DIALECT_DIRS = {"dialects", "generators", "parsers", "typing", "tokenizers"}
@@ -60,7 +62,13 @@ class Selector:
         self.number_by_id = {test["id"]: test["number"] for test in tests}
         self.model_numbers = tuple(self.number_by_id.get(test) for test in model["ids"])
         self.symbol_coverage = model.get("symbols", {})
+        self.sources = model.get("sources", {})
+        self.affinity = model.get("affinity", {})
         self.scopes = model.get("scopes", {})
+        self.fixtures = {
+            path: {self.number_by_id[test] for test in ids if test in self.number_by_id}
+            for path, ids in model.get("fixtures", {}).items()
+        }
         self.conservative = conservative
         self.unobserved = {self.number_by_id[test] for test in model.get("unobserved", [])
                            if test in self.number_by_id}
@@ -84,9 +92,12 @@ class Selector:
         return chosen
 
     def match_fixture(self, path):
+        readers = self.fixtures.get(path, set())
         stem = PurePosixPath(path).stem
         if result := self.named.get("test_" + stem):
-            return result
+            return readers | result
+        if readers:
+            return readers
         stem = stem.split("__")[0]
         while stem:
             if result := self.named.get("test_" + stem):
@@ -106,8 +117,10 @@ class Selector:
         for line in added:
             for nearby in range(line - 2, line + 3):
                 mask |= int(lines.get(str(nearby), "0"), 16)
+        dialect_mask = self.dialect_mask(path)
         for symbol in symbols:
-            mask |= int(self.symbol_coverage.get(symbol, "0"), 16)
+            symbol_mask = int(self.symbol_coverage.get(symbol, "0"), 16)
+            mask |= symbol_mask & dialect_mask if dialect_mask else symbol_mask
         for line in branches:
             for start, end, bits in self.scopes.get(path, ()):
                 if start <= line <= end:
@@ -116,6 +129,13 @@ class Selector:
         dialect = part.parent.name in DIALECT_DIRS and stem not in {"dialect", "__init__"}
         if dialect:
             candidates = self.numbers(mask)
+            if candidates and not symbols and not self.conservative:
+                changed = old | added
+                if changed and all(
+                    any(start <= line <= end for start, end, _ in self.scopes.get(path, ()))
+                    for line in changed
+                ):
+                    return candidates
             return candidates | self.by_file.get(f"tests/dialects/test_{stem}.py", set()) or self.all_numbers
         if mask and (covered := self.numbers(mask)):
             return covered
@@ -128,17 +148,29 @@ class Selector:
             return self.numbers(mask) or self.all_numbers
         return self.all_numbers
 
+    def dialect_mask(self, path):
+        module = PurePosixPath(path)
+        if module.parent.name in DIALECT_DIRS:
+            return int(self.affinity.get(module.stem, "0"), 16)
+        return 0
+
     def select(self, patch):
         changes, additions, symbols, branches, changed_logic = parse_changes(patch)
+        equivalent = set(equivalent_comment_edits(patch, self.sources)) if not self.conservative else set()
         chosen = set()
         for file, lines in changes.items():
+            if file in equivalent:
+                continue
             if file.startswith("tests/fixtures/"):
                 chosen.update(self.match_fixture(file))
             elif file in self.by_file:
                 chosen.update(self.by_file[file])
             elif file.startswith("sqlglot/") and file.endswith(".py"):
                 chosen.update(self.test_source(file, lines, additions[file], symbols[file], branches[file]))
-                if self.conservative or file in changed_logic:
+                affinity = self.dialect_mask(file)
+                if affinity and (file in changed_logic or symbols[file]) and not self.conservative:
+                    chosen.update(self.integration & self.numbers(affinity))
+                elif self.conservative or file in changed_logic:
                     chosen.update(self.integration)
                 elif symbols[file]:
                     chosen.update(self.optimizers)
