@@ -42,4 +42,3 @@ The Docker entry point uses `/data` and writes one JSON line per patch.
 `build_coverage.py` regenerates the map from the pinned checkout and
 public test inventory. Coverage instrumentation runs during preparation.
 The container uses only Python's standard library.
-
