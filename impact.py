@@ -70,3 +70,38 @@ def equivalent_comment_edits(patch, sources):
                 yield file
         except SyntaxError:
             continue
+
+def collection_risk(patch, sources):
+    """Identify changes that can invalidate imports before test bodies run."""
+    risky = set()
+    paths = {
+        line.partition(" b/")[2]
+        for line in patch.splitlines()
+        if line.startswith("diff --git ") and " b/sqlglot/" in line and line.endswith(".py")
+    }
+    for path in paths & sources.keys():
+        before = sources[path]
+        after = apply_file_patch(before, patch, path)
+        if after is None:
+            risky.add(path)
+            continue
+        try:
+            before_tree = ast.parse(before)
+            after_tree = ast.parse(after)
+        except SyntaxError:
+            risky.add(path)
+            continue
+        if exposed_names(before_tree) - exposed_names(after_tree):
+            risky.add(path)
+    return risky
+
+
+def exposed_names(tree):
+    """Collect module imports and definitions that importers can reference."""
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+    return names

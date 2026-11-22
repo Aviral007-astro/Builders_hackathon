@@ -6,7 +6,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 
-from impact import equivalent_comment_edits
+from impact import collection_risk, equivalent_comment_edits
 
 
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
@@ -126,14 +126,6 @@ class Selector:
                 if start <= line <= end:
                     mask |= int(bits, 16)
                     break
-        if not self.conservative:
-            for line in old:
-                if str(line) in lines:
-                    continue
-                for start, end, bits in self.scopes.get(path, ()):
-                    if start <= line <= end:
-                        mask |= int(bits, 16)
-                        break
         dialect = part.parent.name in DIALECT_DIRS and stem not in {"dialect", "__init__"}
         if dialect:
             candidates = self.numbers(mask)
@@ -164,6 +156,8 @@ class Selector:
 
     def select(self, patch):
         changes, additions, symbols, branches, changed_logic = parse_changes(patch)
+        if collection_risk(patch, self.sources):
+            return self.all_numbers
         equivalent = set(equivalent_comment_edits(patch, self.sources)) if not self.conservative else set()
         chosen = set()
         for file, lines in changes.items():
@@ -176,11 +170,11 @@ class Selector:
             elif file.startswith("sqlglot/") and file.endswith(".py"):
                 chosen.update(self.test_source(file, lines, additions[file], symbols[file], branches[file]))
                 affinity = self.dialect_mask(file)
-                if affinity and (file in changed_logic or branches[file] or symbols[file]) and not self.conservative:
+                if affinity and (file in changed_logic or symbols[file]) and not self.conservative:
                     chosen.update(self.integration & self.numbers(affinity))
                 elif self.conservative or file in changed_logic:
                     chosen.update(self.integration)
-                elif symbols[file] or (branches[file] and file.startswith("sqlglot/optimizer/")):
+                elif symbols[file]:
                     chosen.update(self.optimizers)
                 chosen.update(self.unobserved)
             else:
