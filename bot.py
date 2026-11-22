@@ -112,7 +112,7 @@ class Arena:
 
 
 class Bot:
-    name = "Oval Relay"
+    name = "Oval Circuit"
 
     def __init__(self, hello):
         self.config = hello["config"]
@@ -124,6 +124,7 @@ class Bot:
         self.direction = (0.0, 0.0)
         self.last_position = None
         self.stalled = 0
+        self.focus_id = None
         self.attacked = -100.0
         self.attack_bearing = 0.0
 
@@ -181,6 +182,9 @@ class Bot:
             return target, False
 
         angle = math.atan2(y - cy, x - cx) if distance > 1 else self.phase
+        # Search for fresh loot while the circle holds, then settle as it closes.
+        if me["cubes"] < 6 and pressure < 0.7 and radius > 65:
+            angle += 0.35 if math.sin(self.phase) >= 0 else -0.35
         staging = radius * (0.63 if radius > 100 else 0.44)
         staging = min(staging, max(0, zone["radius"] - 15))
         return (cx + math.cos(angle) * staging, cy + math.sin(angle) * staging), False
@@ -379,10 +383,13 @@ class Bot:
 
         targets = []
         for actor, dist in enemies[:5]:
-            if dist < 140 or (hp > 0.50 and pressure < 0.85 and dist < 220):
+            if dist < 225 or (me["weapons"][1] and me["weapons"][1]["kind"] == "laser" and dist < 275):
                 points = 48 - 0.20 * dist + 24 * (1 - actor.get("hp", 1400) / max(1, actor.get("max_hp", 1400)))
+                points += 9 * (actor["id"] == self.focus_id)
+                if actor.get("hp", 1400) < 330:
+                    points += 28
                 targets.append((points, actor))
-        if pressure < 0.6 and hp > 0.72 and not urgent:
+        if pressure < 0.7 and hp > 0.60 and not urgent:
             for actor in sorted(obs["crates"], key=lambda item: math.dist(item["pos"], me["pos"]))[:2]:
                 distance = math.dist(actor["pos"], me["pos"])
                 if distance < 72 and me["cubes"] < 10:
@@ -390,7 +397,7 @@ class Bot:
 
         best = None
         for score, actor in targets:
-            if hp < 0.32 and nearby > 32 and obs["alive"] > 2:
+            if hp < 0.32 and nearby > 45 and now - self.attacked > 1.5 and obs["alive"] > 2 and actor.get("hp", 1400) > 330:
                 continue
             for slot, weapon in enumerate(me["weapons"]):
                 if not weapon or weapon.get("reload", 0) > 0.18:
@@ -406,6 +413,7 @@ class Bot:
                         best = value, actor, slot, firing
         if best:
             _, actor, slot, (aim, tolerance) = best
+            self.focus_id = actor["id"]
             action["aim"] = list(aim)
             for index, weapon in enumerate(me["weapons"]):
                 if not weapon:
@@ -431,7 +439,7 @@ class Bot:
             elif now - self.attacked < 3:
                 yaw = self.attack_bearing
             else:
-                yaw = math.atan2(goal[1] - y, goal[0] - x) + 0.8 * math.sin(now * 0.37 + self.phase)
+                yaw = math.remainder(now * 1.55 + self.phase, math.tau)
             action["aim"] = [yaw, 0.0]
             action["reload"] = any(weapon and weapon["kind"] == "gun"
                                    and weapon.get("ammo", 12) < 8 for weapon in me["weapons"])
