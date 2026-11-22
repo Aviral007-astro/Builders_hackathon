@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 import mechfight as mf
+from navigation import Navigator, walk_segment
 
 
 DIRECTIONS = [(math.cos(i * math.tau / 16), math.sin(i * math.tau / 16))
@@ -111,11 +112,13 @@ class Arena:
 
 
 class Bot:
-    name = "Oval Drift"
+    name = "Oval Relay"
 
     def __init__(self, hello):
         self.config = hello["config"]
         self.arena = Arena(hello["map"]["dir"])
+        self.navigator = Navigator(self.arena, hello["map"]["dir"])
+        self.loot_memory = {}
         self.phase = (hello["seed"] % 97) / 97 * math.tau
         self.pickup_radius = self.config["loot"]["pickup_radius"]
         self.direction = (0.0, 0.0)
@@ -140,26 +143,40 @@ class Bot:
             return (cx, cy), True
 
         held = {weapon["kind"] for weapon in me["weapons"] if weapon}
-        loot = []
-        if pressure < 0.8 and nearby > 20:
-            for item in obs["cubes"]:
-                loot.append((30.0, item))
-            for item in obs["pickups"]:
-                kind = item["kind"]
-                if kind not in held and PREFERENCE.get(kind, -1) > max(PREFERENCE.get(k, -1) for k in held | {"gun"}):
-                    loot.append((36.0 if kind == "laser" else 23.0, item))
-            for drop in obs["drops"]:
-                if drop["lands_in"] < 2 and drop["holder"] in (None, me["id"]):
-                    loot.append((33.0, drop))
-        best, target = 0.0, None
-        for reward, item in loot:
+        # Keep short-lived observations so turning the torso cannot erase a goal.
+        for group in ("crates", "cubes", "pickups", "drops"):
+            for item in obs[group]:
+                self.loot_memory[item["id"]] = (group, item, now)
+        visible_ids = {item["id"] for group in ("crates", "cubes", "pickups", "drops") for item in obs[group]}
+        best, target = -math.inf, None
+        for key, (group, item, seen) in list(self.loot_memory.items()):
             lx, ly, lz = item["pos"]
             dist = math.hypot(lx - x, ly - y)
-            if (abs(lz - z) < 4 and math.hypot(lx - cx, ly - cy) <= max(radius - 8, 0)
-                    and self.arena.clear((x, y, z + 2), (lx, ly, lz + 2))):
-                score = reward - dist
-                if score > best:
-                    best, target = score, (lx, ly)
+            if now - seen > 6 or (key not in visible_ids and dist < 8):
+                del self.loot_memory[key]
+                continue
+            if pressure > 1.15 or abs(lz - z) > 7 or dist > 140:
+                continue
+            if group == "cubes":
+                value = 100
+            elif group == "pickups":
+                if PREFERENCE.get(item["kind"], 0) <= max(PREFERENCE.get(k, 0) for k in held | {"gun"}):
+                    continue
+                value = 83 if item["kind"] == "laser" else 62
+            elif group == "crates":
+                value = 55 if me["cubes"] < 10 else 24
+            else:
+                if item["lands_in"] > 6 or item["holder"] not in (None, me["id"]):
+                    continue
+                value = 100
+            return_trip = max(0, math.hypot(lx - cx, ly - cy) - radius + 8)
+            if (dist + return_trip) / max(1, speed * 0.7) + 8 > zone["shrink_end"] - now:
+                continue
+            if math.hypot(lx - zone["center"][0], ly - zone["center"][1]) > zone["radius"] - 4:
+                continue
+            score = value - dist * 0.52 - (now - seen) * 2 - abs(lz - z) * 1.2
+            if score > best and score > 0:
+                best, target = score, (lx, ly)
         if target is not None:
             return target, False
 
@@ -187,13 +204,25 @@ class Bot:
         if sprint:
             desired_speed = me["stats"]["boost_speed"]
         horizon = min(17, max(6.0, desired_speed * 0.9))
+        if not fleeing:
+            horizon = min(horizon, max(0.5, remaining))
         threat = enemies[:3]
         incoming = self.incoming(obs, me)
+        if not threat and not incoming and remaining > 0.1:
+            length = min(horizon, remaining)
+            end = (x + (gx-x) * length/remaining, y + (gy-y) * length/remaining)
+            if walk_segment(self.arena,x,y,z,end,radius,height,me["stats"]["step_up"]):
+                scale = min(1, remaining / 3.5)
+                self.direction = (scale*(gx-x)/remaining, scale*(gy-y)/remaining)
+                return list(self.direction), sprint and remaining > 4, False
         best = -math.inf
         direction = (0.0, 0.0)
         open_distance = 0.0
         cover_weight = 1.0 if urgent else 1.7
-        for dx, dy in DIRECTIONS:
+        choices = DIRECTIONS
+        if remaining > 0.1:
+            choices = [((gx-x)/remaining, (gy-y)/remaining), *DIRECTIONS]
+        for dx, dy in choices:
             if dx or dy:
                 free = max(0, self.arena.walk(x, y, z, height, dx, dy, horizon,
                                               me["stats"]["step_up"], radius))
@@ -327,7 +356,8 @@ class Bot:
         pressure = sum(max(0, 1 - dist / 100) for _, dist in enemies[:5])
         pressure += 0.55 * (now - self.attacked < 2) + 0.7 * (hp < 0.45)
         goal, urgent = self.destination(obs, nearby, pressure)
-        move, boost, jump = self.move(obs, enemies, goal, urgent, pressure)
+        waypoint = self.navigator.waypoint(me, goal, now)
+        move, boost, jump = self.move(obs, enemies, waypoint, urgent, pressure)
         action = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump,
                   "fire": [False, False]}
         near = [item for item in obs["pickups"] if
@@ -349,7 +379,7 @@ class Bot:
 
         targets = []
         for actor, dist in enemies[:5]:
-            if dist < 110 or (hp > 0.72 and pressure < 0.8 and dist < 195):
+            if dist < 140 or (hp > 0.50 and pressure < 0.85 and dist < 220):
                 points = 48 - 0.20 * dist + 24 * (1 - actor.get("hp", 1400) / max(1, actor.get("max_hp", 1400)))
                 targets.append((points, actor))
         if pressure < 0.6 and hp > 0.72 and not urgent:

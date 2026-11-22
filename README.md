@@ -1,7 +1,15 @@
-# Oval Drift
+# Oval Relay
 
-Oval Drift is a Python bot for the Builders Buildathon Mech Royale track. It reads the organizer's arena map at startup and uses an obstacle index, terrain heights, and line-of-sight checks to compare short movement options.
+Oval Relay runs in the official Mech Royale Python wrapper. It builds a coarse walkable grid from the supplied game map, uses weighted A* to route to an objective, and checks nearby waypoints with the local movement model. The action controller scales its lookahead near a waypoint so it can reach a pickup or finish a turn.
 
-The bot prioritizes staying inside the closing zone, breaking contact under pressure, and collecting nearby upgrades. It uses visible projectile trajectories to help choose movement and uses the simulator's weapon stats when aiming.
+Resource selection considers item value, distance, observation age, vertical separation, and time left to return to the shrinking circle. The bot remembers recently seen items for six seconds. It can approach crates before the first zone shrink.
 
-The Dockerfile uses the official kit's JSON-lines wrapper. The kit supplies the arena, recorded observations, and conformance checker. The recorded observations verify protocol and latency. Practice matches on the official track measure placement.
+The route benchmark uses paired ground-only journeys between map points with a blocked straight route. It measures arrivals under approximate movement and collision rules. The official recorded-stream checker measures protocol conformance and decision latency. Practice placement requires the competition grader.
+
+## Design references
+
+- [Amit Patel's A* implementation guide](https://www.redblobgames.com/pathfinding/a-star/implementation.html)
+- [Craig Reynolds on path following and steering](https://www.red3d.com/cwr/papers/1999/gdc99steer.html)
+- [id Software's item-goal selection in Quake III Arena](https://github.com/id-Software/Quake-III-Arena/blob/master/code/botlib/be_ai_goal.c)
+
+To rebuild the navigation data, use Python 3.13 and run `python build_navigation.py PATH_TO_KIT/arena ground.json` from the bot directory. The runtime verifies the arena fingerprint before loading the precomputed edges.
