@@ -68,7 +68,9 @@ def augment(base, destination, readers):
         model = json.load(source)
     for path, ids in sorted(readers.items()):
         original = model["fixtures"].get(path, [])
-        model["fixtures"][path] = sorted(set(original) | set(ids))
+        extra = set(ids) - set(original)
+        if extra:
+            model.setdefault("observed_fixtures", {})[path] = sorted(extra)
     payload = json.dumps(model, separators=(",", ":")).encode()
     destination.write_bytes(gzip.compress(payload, mtime=0))
 

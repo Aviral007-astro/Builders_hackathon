@@ -70,6 +70,10 @@ class Selector:
             path: {self.number_by_id[test] for test in ids if test in self.number_by_id}
             for path, ids in model.get("fixtures", {}).items()
         }
+        self.observed_fixtures = {
+            path: {self.number_by_id[test] for test in ids if test in self.number_by_id}
+            for path, ids in model.get("observed_fixtures", {}).items()
+        }
         self.conservative = conservative
         self.unobserved = {self.number_by_id[test] for test in model.get("unobserved", [])
                            if test in self.number_by_id}
@@ -208,7 +212,7 @@ class Selector:
             if file in equivalent:
                 continue
             if file.startswith("tests/fixtures/"):
-                chosen.update(self.match_fixture(file))
+                chosen.update(self.match_fixture(file) | self.observed_fixtures.get(file, set()))
             elif file in self.by_file:
                 chosen.update(self.by_file[file])
             elif file.startswith("sqlglot/") and file.endswith(".py"):
