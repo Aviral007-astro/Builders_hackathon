@@ -6,7 +6,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 
-from impact import collection_risk, equivalent_comment_edits
+from impact import equivalent_comment_edits
 
 
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
@@ -57,6 +57,7 @@ def parse_changes(text):
 class Selector:
     def __init__(self, tests, model, conservative):
         self.tests = tests
+        self.durations = {test["number"]: round(test["seconds"] * 1000) for test in tests}
         self.all_numbers = {test["number"] for test in tests}
         self.coverage = model["lines"]
         self.number_by_id = {test["id"]: test["number"] for test in tests}
@@ -154,10 +155,53 @@ class Selector:
             return int(self.affinity.get(module.stem, "0"), 16)
         return 0
 
+    def spare_candidates(self, patch, selected):
+        changes, additions, symbols, branches, _ = parse_changes(patch)
+        evidence = Counter()
+        equivalent = set(equivalent_comment_edits(patch, self.sources))
+        for path, old in changes.items():
+            if path in equivalent or not path.startswith("sqlglot/") or not path.endswith(".py"):
+                continue
+            changed = old | additions[path]
+            masks = defaultdict(int)
+            for start, end, mask in self.scopes.get(path, ()):
+                if any(start <= line <= end for line in changed):
+                    masks["scope"] |= int(mask, 16)
+            if affinity := self.dialect_mask(path):
+                masks["dialect"] = affinity
+            for symbol in symbols[path]:
+                masks["symbol"] |= int(self.symbol_coverage.get(symbol, "0"), 16)
+            for source, weight in (("scope", 8), ("symbol", 5), ("dialect", 3)):
+                for number in self.numbers(masks[source]) - selected:
+                    evidence[number] += weight
+            if branches[path] or symbols[path]:
+                for number in self.integration - selected:
+                    evidence[number] += 1
+        return evidence
+
+    def fill_spare(self, patch, selected, lanes):
+        if not lanes:
+            return lanes
+        durations = self.durations
+        loads = [sum(durations[number] for number in lane) for lane in lanes]
+        # Limit the extra simulated cost to 250 ms per commit.
+        cutoff = max(loads) + 250
+        capacity = [cutoff - load for load in loads]
+        if not max(capacity):
+            return lanes
+        candidates = self.spare_candidates(patch, selected)
+        ranked = sorted(candidates, key=lambda number: (-candidates[number], durations[number], number))
+        for number in ranked:
+            duration = durations[number]
+            feasible = [index for index, spare in enumerate(capacity) if duration <= spare]
+            if feasible:
+                index = min(feasible, key=capacity.__getitem__)
+                lanes[index].append(number)
+                capacity[index] -= duration
+        return lanes
+
     def select(self, patch):
         changes, additions, symbols, branches, changed_logic = parse_changes(patch)
-        if collection_risk(patch, self.sources):
-            return self.all_numbers
         equivalent = set(equivalent_comment_edits(patch, self.sources)) if not self.conservative else set()
         chosen = set()
         for file, lines in changes.items():
@@ -206,8 +250,10 @@ def main(data, model, conservative):
     with gzip.open(model, "rt", encoding="utf-8") as stream:
         selector = Selector(tests, json.load(stream), conservative)
     for patch in sorted((data / "commits").glob("*.patch")):
-        chosen = selector.select(patch.read_text(encoding="utf-8", errors="replace"))
+        text = patch.read_text(encoding="utf-8", errors="replace")
+        chosen = selector.select(text)
         workers = balance([by_number[number] for number in chosen])
+        selector.fill_spare(text, chosen, workers)
         print(json.dumps({"commit": patch.stem, "workers": workers}, separators=(",", ":")))
 
 
